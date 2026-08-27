@@ -115,12 +115,13 @@ namespace Files.App.ViewModels.UserControls
 			}
 		}
 
+		private OpenInIDEOption _cachedOpenInIDEOption;
 		public bool ShowOpenInIDEButton
 		{
 			get
 			{
-				return DevToolsSettingsService.OpenInIDEOption == OpenInIDEOption.AllLocations ||
-					   (DevToolsSettingsService.OpenInIDEOption == OpenInIDEOption.GitRepos && GitBranchDisplayName is not null);
+				return _cachedOpenInIDEOption == OpenInIDEOption.AllLocations ||
+					   (_cachedOpenInIDEOption == OpenInIDEOption.GitRepos && GitBranchDisplayName is not null);
 			}
 		}
 
@@ -137,6 +138,7 @@ namespace Files.App.ViewModels.UserControls
 			NewBranchCommand = new AsyncRelayCommand(()
 				=> GitHelpers.CreateNewBranchAsync(_gitRepositoryPath!, _localBranches[ACTIVE_BRANCH_INDEX].Name));
 
+			_cachedOpenInIDEOption = DevToolsSettingsService.OpenInIDEOption;
 			DevToolsSettingsService.PropertyChanged += DevToolsSettingsService_PropertyChanged;
 			SubscribeToShellPage();
 			ContentPageContext.PropertyChanged += OnContentPageContextPropertyChanged;
@@ -145,7 +147,10 @@ namespace Files.App.ViewModels.UserControls
 		private void DevToolsSettingsService_PropertyChanged(object? sender, PropertyChangedEventArgs e)
 		{
 			if (e.PropertyName is nameof(DevToolsSettingsService.OpenInIDEOption))
+			{
+				_cachedOpenInIDEOption = DevToolsSettingsService.OpenInIDEOption;
 				OnPropertyChanged(nameof(ShowOpenInIDEButton));
+			}
 		}
 
 		private void OnContentPageContextPropertyChanged(object? sender, PropertyChangedEventArgs e)

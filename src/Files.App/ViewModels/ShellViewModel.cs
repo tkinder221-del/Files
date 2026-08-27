@@ -41,6 +41,7 @@ namespace Files.App.ViewModels
 		private readonly ConcurrentQueue<(uint Action, string FileName)> operationQueue;
 		private readonly ConcurrentQueue<uint> gitChangesQueue;
 		private readonly ConcurrentDictionary<string, bool> itemLoadQueue;
+		private readonly ConcurrentDictionary<string, string?> gitRepositoryPathByDirectory;
 		private readonly AsyncManualResetEvent operationEvent;
 		private readonly AsyncManualResetEvent gitChangedEvent;
 		private readonly DispatcherQueue dispatcherQueue;
@@ -48,6 +49,8 @@ namespace Files.App.ViewModels
 
 		private Task? aProcessQueueAction;
 		private Task? gitProcessQueueAction;
+		private Repository? cachedGitRepository;
+		private string? cachedGitRepositoryPath;
 		private volatile Task? desktopIniUpdateTask;
 
 		// Files and folders list for manipulating
@@ -726,6 +729,7 @@ namespace Files.App.ViewModels
 			operationQueue = new ConcurrentQueue<(uint Action, string FileName)>();
 			gitChangesQueue = new ConcurrentQueue<uint>();
 			itemLoadQueue = new ConcurrentDictionary<string, bool>();
+			gitRepositoryPathByDirectory = new ConcurrentDictionary<string, string?>();
 			thumbnailRetryDebounce = new ConcurrentDictionary<string, CancellationTokenSource>();
 			addFilesCTS = new CancellationTokenSource();
 			semaphoreCTS = new CancellationTokenSource();
@@ -1654,7 +1658,7 @@ namespace Files.App.ViewModels
 					BaseStorageFile? matchingStorageFile = null;
 					if (item.Key is not null && FilesAndFolders.IsGrouped && FilesAndFolders.GetExtendedGroupHeaderInfo is not null)
 					{
-						gp = FilesAndFolders.GroupedCollection?.ToList().FirstOrDefault(x => x.Model.Key == item.Key);
+						gp = FilesAndFolders.GroupedCollection?.FirstOrDefault(x => x.Model.Key == item.Key);
 						loadGroupHeaderInfo = gp is not null && !gp.Model.Initialized && gp.GetExtendedGroupHeaderInfo is not null;
 					}
 
@@ -1929,11 +1933,24 @@ namespace Files.App.ViewModels
 				var gitItemModel = await Task.Run(() =>
 				{
 					token.ThrowIfCancellationRequested();
-					if (!GitHelpers.IsRepositoryEx(gitItem.ItemPath, out var repositoryPath))
+					var itemPath = gitItem.ItemPath;
+					if (string.IsNullOrEmpty(itemPath))
 						return null;
 
-					using var repository = new Repository(repositoryPath);
-					return GitHelpers.GetGitInformationForItem(repository, gitItem.ItemPath, getStatus, getCommit);
+					// IsRepositoryEx walks up from the given path, so folders check themselves and files check their parent
+					var queryPath = gitItem.PrimaryItemAttribute == StorageItemTypes.Folder ? itemPath : Files.App.Helpers.PathNormalization.GetParentDir(itemPath);
+					if (string.IsNullOrEmpty(queryPath))
+						return null;
+
+					var repositoryPath = gitRepositoryPathByDirectory.GetOrAdd(queryPath, static queryPath => GitHelpers.IsRepositoryEx(queryPath, out var repoPath) ? repoPath : null);
+					if (repositoryPath is null)
+						return null;
+
+					var repository = GetOrOpenRepository(repositoryPath);
+					if (repository is null)
+						return null;
+
+					return GitHelpers.GetGitInformationForItem(repository, itemPath, getStatus, getCommit);
 				}, token);
 
 				if (gitItemModel is null)
@@ -1991,6 +2008,18 @@ namespace Files.App.ViewModels
 				if (semaphoreEntered)
 					gitPropertiesSemaphore.Release();
 			}
+		}
+
+		private Repository? GetOrOpenRepository(string repositoryPath)
+		{
+			// Runs under gitPropertiesSemaphore, so the cached instance is only accessed by one caller at a time
+			if (cachedGitRepository is not null && cachedGitRepositoryPath == repositoryPath)
+				return cachedGitRepository;
+
+			cachedGitRepository?.Dispose();
+			cachedGitRepository = new Repository(repositoryPath);
+			cachedGitRepositoryPath = repositoryPath;
+			return cachedGitRepository;
 		}
 
 		private async Task<ImageSource?> GetItemTypeGroupIcon(ListedItem item, BaseStorageFile? matchingStorageItem = null)
@@ -3458,6 +3487,11 @@ namespace Files.App.ViewModels
 			watcherCTS.Cancel();
 			SearchIconBitmapImage = null;
 			currentStorageFolder = null;
+
+			// An in-flight git load may observe the disposed repository; LoadGitPropertiesAsync logs it and resets the item flags
+			cachedGitRepository?.Dispose();
+			cachedGitRepository = null;
+			gitRepositoryPathByDirectory.Clear();
 		}
 	}
 

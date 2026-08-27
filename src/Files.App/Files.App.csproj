@@ -1,4 +1,4 @@
-﻿<!--  Copyright (c) Files Community. Licensed under the MIT License.  -->
+<!--  Copyright (c) Files Community. Licensed under the MIT License.  -->
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
@@ -43,6 +43,12 @@
 
     <PropertyGroup>
         <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
+        <PackageCertificateKeyFile>FilesDev_TemporaryKey.pfx</PackageCertificateKeyFile>
+        <PackageCertificateThumbprint>8B06D591BAE69E27BA5494460B4490EC6BE9B119</PackageCertificateThumbprint>
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(SENTRY_AUTH_TOKEN)' != ''">
@@ -171,3 +177,4 @@
                  Properties="Configuration=$(Configuration);Platform=$(Platform)" />
     </Target>
 </Project>
+

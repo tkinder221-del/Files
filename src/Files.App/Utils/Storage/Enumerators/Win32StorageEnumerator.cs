@@ -36,6 +36,45 @@ namespace Files.App.Utils.Storage
 			var tempList = new List<ListedItem>();
 			var count = 0;
 
+			// Fetch icons concurrently so a slow shell extraction does not stall the FindNextFile loop;
+			// pending fetches are drained before a flush so items never display without their icon
+			var iconGate = new SemaphoreSlim(4);
+			var pendingIcons = new List<Task>();
+
+			async Task LoadIconAsync(ListedItem item, string? extension, bool isFolder)
+			{
+				try
+				{
+					await iconGate.WaitAsync(cancellationToken);
+					try
+					{
+						item.PreloadedIconData = await iconCacheService.GetIconAsync(item.ItemPath, extension, isFolder, iconSize, useCurrentScale);
+					}
+					finally
+					{
+						iconGate.Release();
+					}
+				}
+				catch (OperationCanceledException)
+				{
+				}
+			}
+
+			async Task WaitForIconsAsync()
+			{
+				if (pendingIcons.Count == 0)
+					return;
+
+				try
+				{
+					await Task.WhenAll(pendingIcons);
+				}
+				finally
+				{
+					pendingIcons.Clear();
+				}
+			}
+
 			IUserSettingsService userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
 			bool CalculateFolderSizes = userSettingsService.FoldersSettingsService.CalculateFolderSizes;
 			bool showHiddenItems = userSettingsService.FoldersSettingsService.ShowHiddenItems;
@@ -64,7 +103,7 @@ namespace Files.App.Utils.Storage
 							if (file is not null)
 							{
 								var filePath = file.ItemPath!;
-								file.PreloadedIconData = await iconCacheService.GetIconAsync(file.ItemPath, file.FileExtension, false, iconSize, useCurrentScale);
+								pendingIcons.Add(LoadIconAsync(file, file.FileExtension, false));
 								tempList.Add(file);
 								++count;
 
@@ -80,7 +119,7 @@ namespace Files.App.Utils.Storage
 								if (folder is not null)
 								{
 									var folderPath = folder.ItemPath!;
-									folder.PreloadedIconData = await iconCacheService.GetIconAsync(folder.ItemPath, null, true, iconSize, useCurrentScale);
+									pendingIcons.Add(LoadIconAsync(folder, null, true));
 									tempList.Add(folder);
 									++count;
 
@@ -105,12 +144,12 @@ namespace Files.App.Utils.Storage
 					if (cancellationToken.IsCancellationRequested || count == countLimit)
 						break;
 
-					if (intermediateAction is not null &&
-						(hasFlushedFirstBatch
-							? sampler.CheckNow()
-							: tempList.Count > 0 && firstBatchSampler.CheckNow()))
+					// Skip empty ticks so idle enumeration does not trigger pointless re-sort and UI resets
+					if (intermediateAction is not null && tempList.Count > 0 &&
+						(hasFlushedFirstBatch ? sampler.CheckNow() : firstBatchSampler.CheckNow()))
 					{
 						hasFlushedFirstBatch = true;
+						await WaitForIconsAsync();
 						await intermediateAction(tempList);
 
 						// clear the temporary list every time we do an intermediate action
@@ -122,6 +161,8 @@ namespace Files.App.Utils.Storage
 			{
 				hFile.Dispose();
 			}
+
+			await WaitForIconsAsync();
 
 			return tempList;
 		}
@@ -293,9 +334,21 @@ namespace Files.App.Utils.Storage
 			bool isReparsePoint = ((FileAttributes)findData.dwFileAttributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint;
 			bool isSymlink = isReparsePoint && findData.dwReserved0 == Win32PInvoke.IO_REPARSE_TAG_SYMLINK;
 
+			// Same-directory symlink (CLAUDE.md -> AGENTS.md) treat as normal file to avoid empty view
+			string? symlinkTarget = null;
 			if (isSymlink)
 			{
-				var targetPath = Win32Helper.ParseSymLink(itemPath);
+				symlinkTarget = Win32Helper.ParseSymLink(itemPath);
+				if (!string.IsNullOrEmpty(symlinkTarget) && System.IO.File.Exists(symlinkTarget))
+				{
+					var rootPrefix = pathRoot.EndsWith(Path.DirectorySeparatorChar) ? pathRoot : pathRoot + Path.DirectorySeparatorChar;
+					if (symlinkTarget.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+						isSymlink = false;
+				}
+			}
+
+			if (isSymlink)
+			{
 				if (isGitRepo)
 				{
 					return new GitShortcutItem()
@@ -314,7 +367,7 @@ namespace Files.App.Utils.Storage
 						ItemPath = itemPath,
 						FileSize = itemSize,
 						FileSizeBytes = itemSizeBytes,
-						TargetPath = targetPath,
+						TargetPath = symlinkTarget,
 						IsSymLink = true,
 					};
 				}
@@ -336,7 +389,7 @@ namespace Files.App.Utils.Storage
 						ItemPath = itemPath,
 						FileSize = itemSize,
 						FileSizeBytes = itemSizeBytes,
-						TargetPath = targetPath,
+						TargetPath = symlinkTarget,
 						IsSymLink = true
 					};
 				}

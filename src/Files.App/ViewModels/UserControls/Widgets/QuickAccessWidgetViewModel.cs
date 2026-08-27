@@ -71,27 +71,34 @@ namespace Files.App.ViewModels.UserControls.Widgets
 				await RefreshWidgetAsync();
 		}
 
-		public Task RefreshWidgetAsync()
+		public async Task RefreshWidgetAsync()
 		{
-			return MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(async () =>
+			// P: Enumerate off UI thread to avoid blocking Home load
+			var folders = new List<(IWindowsStorable folder, string displayName, bool isPinned, string tooltip)>();
+			await foreach (IWindowsStorable folder in HomePageContext.HomeFolder.GetQuickAccessFolderAsync(default))
+			{
+				folder.GetPropertyValue<bool>("System.Home.IsPinned", out var isPinned);
+				folder.TryGetShellTooltip(out var tooltip);
+				var displayName = folder.GetDisplayName(SIGDN.SIGDN_PARENTRELATIVEFORUI);
+				folders.Add((folder, displayName, isPinned, tooltip ?? string.Empty));
+			}
+
+			await MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(() =>
 			{
 				foreach (var item in Items)
 					item.Dispose();
 
 				Items.Clear();
 
-				await foreach (IWindowsStorable folder in HomePageContext.HomeFolder.GetQuickAccessFolderAsync(default))
+				foreach (var (folder, displayName, isPinned, tooltip) in folders)
 				{
-					folder.GetPropertyValue<bool>("System.Home.IsPinned", out var isPinned);
-					folder.TryGetShellTooltip(out var tooltip);
-
 					Items.Insert(
 						Items.Count,
 						new WidgetFolderCardItem(
 							folder,
-							folder.GetDisplayName(SIGDN.SIGDN_PARENTRELATIVEFORUI),
+							displayName,
 							isPinned,
-							tooltip ?? string.Empty));
+							tooltip));
 				}
 			});
 		}

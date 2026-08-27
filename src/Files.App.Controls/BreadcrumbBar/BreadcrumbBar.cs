@@ -24,6 +24,7 @@ namespace Files.App.Controls
 		private BreadcrumbBarItem? _ellipsisBreadcrumbBarItem;
 		private BreadcrumbBarItem? _lastBreadcrumbBarItem;
 		private ItemsRepeater? _itemsRepeater;
+		private ItemsSourceView? _subscribedItemsSourceView;
 
 		private bool _isEllipsisRendered;
 
@@ -65,9 +66,21 @@ namespace Files.App.Controls
 			_ellipsisBreadcrumbBarItem.SetOwner(this);
 			_itemsRepeater.Layout = _itemsRepeaterLayout;
 
+			// OnApplyTemplate can run more than once (theme/template reapplication); re-subscribing
+			// would double-handle events and rebuild the WinRT interop marshalers each time.
+			_itemsRepeater.ElementPrepared -= ItemsRepeater_ElementPrepared;
+			_itemsRepeater.ElementClearing -= ItemsRepeater_ElementClearing;
 			_itemsRepeater.ElementPrepared += ItemsRepeater_ElementPrepared;
 			_itemsRepeater.ElementClearing += ItemsRepeater_ElementClearing;
-			_itemsRepeater.ItemsSourceView.CollectionChanged += ItemsSourceView_CollectionChanged;
+
+			if (!ReferenceEquals(_subscribedItemsSourceView, _itemsRepeater.ItemsSourceView))
+			{
+				if (_subscribedItemsSourceView is not null)
+					_subscribedItemsSourceView.CollectionChanged -= ItemsSourceView_CollectionChanged;
+
+				_subscribedItemsSourceView = _itemsRepeater.ItemsSourceView;
+				_subscribedItemsSourceView.CollectionChanged += ItemsSourceView_CollectionChanged;
+			}
 		}
 
 		internal protected virtual void RaiseItemClickedEvent(BreadcrumbBarItem item, PointerRoutedEventArgs? pointerRoutedEventArgs = null)
