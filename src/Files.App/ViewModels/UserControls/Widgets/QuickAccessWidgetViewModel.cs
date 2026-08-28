@@ -73,14 +73,53 @@ namespace Files.App.ViewModels.UserControls.Widgets
 
 		public async Task RefreshWidgetAsync()
 		{
-			// P: Enumerate off UI thread to avoid blocking Home load
+			// Enumerate off UI thread to avoid blocking Home load, but shell COM may require STA.
+			// Collect on background thread and fall back gracefully if COM threading fails.
 			var folders = new List<(IWindowsStorable folder, string displayName, bool isPinned, string tooltip)>();
-			await foreach (IWindowsStorable folder in HomePageContext.HomeFolder.GetQuickAccessFolderAsync(default))
+			try
 			{
-				folder.GetPropertyValue<bool>("System.Home.IsPinned", out var isPinned);
-				folder.TryGetShellTooltip(out var tooltip);
-				var displayName = folder.GetDisplayName(SIGDN.SIGDN_PARENTRELATIVEFORUI);
-				folders.Add((folder, displayName, isPinned, tooltip ?? string.Empty));
+				await foreach (IWindowsStorable folder in HomePageContext.HomeFolder.GetQuickAccessFolderAsync(default))
+				{
+					try
+					{
+						folder.GetPropertyValue<bool>("System.Home.IsPinned", out var isPinned);
+						folder.TryGetShellTooltip(out var tooltip);
+						var displayName = folder.GetDisplayName(SIGDN.SIGDN_PARENTRELATIVEFORUI);
+						folders.Add((folder, displayName, isPinned, tooltip ?? string.Empty));
+					}
+					catch (Exception ex)
+					{
+						System.Diagnostics.Debug.WriteLine($"QuickAccess enumerate item failed: {ex}");
+					}
+				}
+			}
+			catch (Exception ex)
+			{
+				System.Diagnostics.Debug.WriteLine($"QuickAccess enumerate failed: {ex}");
+				// Fallback: try enumeration on UI thread where shell COM is guaranteed to be STA
+				try
+				{
+					await MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(async () =>
+					{
+						folders.Clear();
+						await foreach (IWindowsStorable folder in HomePageContext.HomeFolder.GetQuickAccessFolderAsync(default))
+						{
+							try
+							{
+								folder.GetPropertyValue<bool>("System.Home.IsPinned", out var isPinned);
+								folder.TryGetShellTooltip(out var tooltip);
+								var displayName = folder.GetDisplayName(SIGDN.SIGDN_PARENTRELATIVEFORUI);
+								folders.Add((folder, displayName, isPinned, tooltip ?? string.Empty));
+							}
+							catch
+							{
+							}
+						}
+					});
+				}
+				catch
+				{
+				}
 			}
 
 			await MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(() =>
