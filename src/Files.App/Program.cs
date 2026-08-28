@@ -27,6 +27,27 @@ namespace Files.App
 
 		private const string LaunchCwdKey = "LastLaunchCwd";
 
+		private static bool? _openTabInExistingInstance;
+		private static bool OpenTabInExistingInstance
+		{
+			get
+			{
+				if (_openTabInExistingInstance.HasValue)
+					return _openTabInExistingInstance.Value;
+
+				try
+				{
+					_openTabInExistingInstance = ApplicationData.Current.LocalSettings.Values.Get("OpenTabInExistingInstance", true);
+				}
+				catch
+				{
+					_openTabInExistingInstance = true;
+				}
+
+				return _openTabInExistingInstance.Value;
+			}
+		}
+
 		/// <summary>
 		/// Reads and clears the working directory captured by the source process
 		/// in <see cref="Main"/>, falling back to the current process's working
@@ -34,11 +55,18 @@ namespace Files.App
 		/// </summary>
 		public static string ConsumeLaunchCwd()
 		{
-			var values = ApplicationData.Current.LocalSettings.Values;
-			var cwd = values.TryGetValue(LaunchCwdKey, out var raw) ? raw as string : null;
-			if (cwd is not null)
-				values.Remove(LaunchCwdKey);
-			return string.IsNullOrEmpty(cwd) ? Environment.CurrentDirectory : cwd;
+			try
+			{
+				var values = ApplicationData.Current.LocalSettings.Values;
+				var cwd = values.TryGetValue(LaunchCwdKey, out var raw) ? raw as string : null;
+				if (cwd is not null)
+					values.Remove(LaunchCwdKey);
+				return string.IsNullOrEmpty(cwd) ? Environment.CurrentDirectory : cwd;
+			}
+			catch
+			{
+				return Environment.CurrentDirectory;
+			}
 		}
 
 		static Program()
@@ -46,7 +74,13 @@ namespace Files.App
 			// Capture the source process's working directory before any potential
 			// activation redirect, so a receiving instance can resolve relative
 			// paths like "." against the terminal's CWD rather than its own. (#16982)
-			ApplicationData.Current.LocalSettings.Values[LaunchCwdKey] = Environment.CurrentDirectory;
+			try
+			{
+				ApplicationData.Current.LocalSettings.Values[LaunchCwdKey] = Environment.CurrentDirectory;
+			}
+			catch
+			{
+			}
 
 			var pool = new Semaphore(0, 1, $"Files-{AppLifecycleHelper.AppEnvironment}-Instance", out var isNew);
 
@@ -128,7 +162,19 @@ namespace Files.App
 			// Now we can do the first WinRT server call
 			//Server.AppInstanceMonitor.StartMonitor(Environment.ProcessId);
 
-			var OpenTabInExistingInstance = ApplicationData.Current.LocalSettings.Values.Get("OpenTabInExistingInstance", true);
+			// Optional XAML performance changes must be opted into before XAML initialization.
+			// Wrapped in try/catch so an SDK mismatch (missing XamlChangeId) cannot crash startup;
+			// individual EnableChange calls are idempotent, so no duplicate block is needed later.
+			try
+			{
+				XamlOptionalChanges.EnableChange(XamlChangeId.DefaultStyleOptimizations);
+				XamlOptionalChanges.EnableChange(XamlChangeId.OptimizeApplyStyles);
+				XamlOptionalChanges.EnableChange(XamlChangeId.IconNoGridOptimization);
+				XamlOptionalChanges.EnableChange(XamlChangeId.DeferContextFlyoutInit);
+			}
+			catch
+			{
+			}
 
 			AppActivationArguments activatedArgs;
 			try
@@ -242,12 +288,6 @@ namespace Files.App
 				currentInstance.Activated += OnActivated;
 
 			ApplicationData.Current.LocalSettings.Values["INSTANCE_ACTIVE"] = -Environment.ProcessId;
-
-			// Optional XAML performance changes must be opted into before XAML initialization
-			XamlOptionalChanges.EnableChange(XamlChangeId.DefaultStyleOptimizations);
-			XamlOptionalChanges.EnableChange(XamlChangeId.OptimizeApplyStyles);
-			XamlOptionalChanges.EnableChange(XamlChangeId.IconNoGridOptimization);
-			XamlOptionalChanges.EnableChange(XamlChangeId.DeferContextFlyoutInit);
 
 			Application.Start((p) =>
 			{
