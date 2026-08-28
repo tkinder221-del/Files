@@ -28,44 +28,54 @@ namespace Files.App.Helpers
 		private readonly static string AppInformationKey = @$"Software\Files Community\{Package.Current.Id.Name}\v1\AppInformation";
 
 		/// <summary>
-		/// Gets the value that indicates whether the app is updated.
-		/// </summary>
-		public static bool IsAppUpdated { get; }
-
-		/// <summary>
-		/// Gets the value that indicates whether the app is running for the first time.
-		/// </summary>
-		public static bool IsFirstRun { get; }
-
-		/// <summary>
-		/// Gets the value that indicates the total launch count of the app.
-		/// </summary>
-		public static long TotalLaunchCount { get; }
-
-		/// <summary>
 		/// Gets the value that indicates if the release notes tab was automatically opened.
 		/// </summary>
 		private static bool ViewedReleaseNotes { get; set; } = false;
 
-		static AppLifecycleHelper()
-		{
-			using var infoKey = Registry.CurrentUser.CreateSubKey(AppInformationKey);
-			var version = infoKey.GetValue("LastLaunchVersion");
-			var launchCount = infoKey.GetValue("TotalLaunchCount");
-			if (version is null)
-			{
-				IsAppUpdated = true;
-				IsFirstRun = true;
-			}
-			else
-			{
-				IsAppUpdated = version.ToString() != AppVersion.ToString();
-			}
+		/// <summary>
+		/// Gets the value that indicates if the app is updated.
+		/// </summary>
+		public static bool IsAppUpdated => _lifecycleState.Value.IsAppUpdated;
 
-			TotalLaunchCount = long.TryParse(launchCount?.ToString(), out var v) ? v + 1 : 1;
-			infoKey.SetValue("LastLaunchVersion", AppVersion.ToString());
-			infoKey.SetValue("TotalLaunchCount", TotalLaunchCount);
-		}
+		/// <summary>
+		/// Gets the value that indicates that the app is running for the first time.
+		/// </summary>
+		public static bool IsFirstRun => _lifecycleState.Value.IsFirstRun;
+
+		/// <summary>
+		/// Gets the value that indicates the total launch count of the app.
+		/// </summary>
+		public static long TotalLaunchCount => _lifecycleState.Value.TotalLaunchCount;
+
+		private sealed record LifecycleState(bool IsAppUpdated, bool IsFirstRun, long TotalLaunchCount);
+
+		// Deferred from a static cctor: runs only when one of the above properties is first accessed,
+		// and performs the registry read/write atomically in a single open to keep LastLaunchVersion
+		// and TotalLaunchCount consistent.
+		private static readonly Lazy<LifecycleState> _lifecycleState = new(static () =>
+		{
+			try
+			{
+				using var infoKey = Registry.CurrentUser.CreateSubKey(AppInformationKey);
+				if (infoKey is null)
+					return new LifecycleState(true, true, 1);
+
+				var version = infoKey!.GetValue("LastLaunchVersion");
+				var launchCount = infoKey.GetValue("TotalLaunchCount");
+				var isFirstRun = version is null;
+				var isAppUpdated = isFirstRun || !string.Equals(version!.ToString(), AppVersion!.ToString(), StringComparison.Ordinal);
+				var total = long.TryParse(launchCount?.ToString(), out var v) ? v + 1 : 1;
+				infoKey.SetValue("LastLaunchVersion", AppVersion!.ToString());
+				infoKey.SetValue("TotalLaunchCount", total);
+				return new LifecycleState(isAppUpdated, isFirstRun, total);
+			}
+			catch
+			{
+				// Registry or Package not available (e.g. unpackaged test); fall back to safe defaults
+				// and avoid caching a faulted Lazy that would rethrow on every access.
+				return new LifecycleState(true, true, 1);
+			}
+		}, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
 
 		/// <summary>
 		/// Gets the value that provides application environment or branch name.
