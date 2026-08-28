@@ -38,9 +38,20 @@ namespace Files.App
 			AppWindow.TitleBar.ButtonPressedBackgroundColor = Colors.Transparent;
 			AppWindow.TitleBar.ButtonHoverBackgroundColor = Colors.Transparent;
 
-			// Deferred: reads the .ico from disk
+			// Deferred: reads the .ico from disk - guard file-not-found (80070003) which stows via CoreMessagingXP and crashes with c000027b
 			DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
-				AppWindow.SetIcon(AppLifecycleHelper.AppIconPath));
+			{
+				try
+				{
+					var iconPath = AppLifecycleHelper.AppIconPath;
+					if (!string.IsNullOrEmpty(iconPath) && System.IO.File.Exists(iconPath))
+						AppWindow.SetIcon(iconPath);
+				}
+				catch (Exception ex)
+				{
+					System.Diagnostics.Debug.WriteLine($"SetIcon failed: {ex.Message}");
+				}
+			});
 		}
 
 		public void ShowSplashScreen()
