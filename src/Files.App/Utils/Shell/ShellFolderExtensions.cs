@@ -122,8 +122,10 @@ namespace Files.App.Utils.Shell
 			var link = new ShellLinkItem(baseItem)
 			{
 				// The attributes persisted in the link file avoid opening the target,
-				// which can block on unreachable network locations
-				IsFolder = linkItem.StoredTargetIsFolder() ?? linkItem.IsTargetFolder(targetPath),
+				// which can block on unreachable network locations. Fall back to false
+				// rather than IsTargetFolder() which would open the target during enumeration
+				// and may deadlock or throw on STA when called from a background thread.
+				IsFolder = linkItem.StoredTargetIsFolder() ?? false,
 				RunAsAdmin = linkItem.RunAsAdministrator,
 				ShowWindowCommand = (Windows.Win32.UI.WindowsAndMessaging.SHOW_WINDOW_CMD)linkItem.ShowState,
 				Arguments = linkItem.Arguments,

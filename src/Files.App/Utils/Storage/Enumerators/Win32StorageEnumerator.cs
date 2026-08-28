@@ -50,6 +50,13 @@ namespace Files.App.Utils.Storage
 					{
 						item.PreloadedIconData = await iconCacheService.GetIconAsync(item.ItemPath, extension, isFolder, iconSize, useCurrentScale);
 					}
+					catch (OperationCanceledException)
+					{
+					}
+					catch (Exception ex)
+					{
+						System.Diagnostics.Debug.WriteLine($"Preload icon failed for {item.ItemPath}: {ex.Message}");
+					}
 					finally
 					{
 						iconGate.Release();
@@ -57,6 +64,10 @@ namespace Files.App.Utils.Storage
 				}
 				catch (OperationCanceledException)
 				{
+				}
+				catch (Exception ex)
+				{
+					System.Diagnostics.Debug.WriteLine($"iconGate wait failed: {ex.Message}");
 				}
 			}
 
@@ -68,6 +79,10 @@ namespace Files.App.Utils.Storage
 				try
 				{
 					await Task.WhenAll(pendingIcons);
+				}
+				catch (Exception ex)
+				{
+					System.Diagnostics.Debug.WriteLine($"WaitForIcons failed: {ex.Message}");
 				}
 				finally
 				{
@@ -103,7 +118,10 @@ namespace Files.App.Utils.Storage
 							if (file is not null)
 							{
 								var filePath = file.ItemPath!;
-								pendingIcons.Add(LoadIconAsync(file, file.FileExtension, false));
+								// Shortcuts resolve their target icon lazily; preloading via shell extraction
+								// on a background thread can re-enter STA COM and deadlock. Skip here, LoadExtendedProperties will handle it.
+								if (!FileExtensionHelpers.IsShortcutOrUrlFile(file.FileExtension ?? string.Empty))
+									pendingIcons.Add(LoadIconAsync(file, file.FileExtension, false));
 								tempList.Add(file);
 								++count;
 
