@@ -157,8 +157,24 @@ namespace Files.App
 				}
 
 				// Configure Sentry
+				// Sentry init is heavy (beforeSend/beforeBreadcrumb closures, transport setup) and is not
+				// required before the first frame; run it off the UI thread so it does not block navigation.
+				// Guard the background task so a Sentry init failure cannot surface as an unobserved
+				// exception and trigger the fatal handler (which calls Environment.Exit).
 				if (AppLifecycleHelper.AppEnvironment is not AppEnvironment.Dev)
-					AppLifecycleHelper.ConfigureSentry();
+				{
+					_ = Task.Run(() =>
+					{
+						try
+						{
+							AppLifecycleHelper.ConfigureSentry();
+						}
+						catch (Exception ex)
+						{
+							System.Diagnostics.Debug.WriteLine($"Sentry init failed: {ex}");
+						}
+					});
+				}
 
 				var userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
 				var isLeaveAppRunning = userSettingsService.GeneralSettingsService.LeaveAppRunning;
