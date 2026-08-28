@@ -412,3 +412,10 @@ src/Files.App/Assets/FilesOpenDialog/Files.App.Launcher.exe.sha256
 
 # ZCode session files
 .zcode/
+
+# Local agent / diagnostic artifacts (Mimosa, local perf probes)
+.mimosa/
+.opencode/
+tools/
+build-msix.ps1
+CppProperties.json
