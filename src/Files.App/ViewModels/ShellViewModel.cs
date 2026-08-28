@@ -2013,13 +2013,21 @@ namespace Files.App.ViewModels
 		private Repository? GetOrOpenRepository(string repositoryPath)
 		{
 			// Runs under gitPropertiesSemaphore, so the cached instance is only accessed by one caller at a time
-			if (cachedGitRepository is not null && cachedGitRepositoryPath == repositoryPath)
-				return cachedGitRepository;
+			try
+			{
+				if (cachedGitRepository is not null && cachedGitRepositoryPath == repositoryPath)
+					return cachedGitRepository;
 
-			cachedGitRepository?.Dispose();
-			cachedGitRepository = new Repository(repositoryPath);
-			cachedGitRepositoryPath = repositoryPath;
-			return cachedGitRepository;
+				try { cachedGitRepository?.Dispose(); } catch { }
+				cachedGitRepository = new Repository(repositoryPath);
+				cachedGitRepositoryPath = repositoryPath;
+				return cachedGitRepository;
+			}
+			catch (Exception ex)
+			{
+				System.Diagnostics.Debug.WriteLine($"GetOrOpenRepository failed for {repositoryPath}: {ex.Message}");
+				return null;
+			}
 		}
 
 		private async Task<ImageSource?> GetItemTypeGroupIcon(ListedItem item, BaseStorageFile? matchingStorageItem = null)
@@ -3489,8 +3497,9 @@ namespace Files.App.ViewModels
 			currentStorageFolder = null;
 
 			// An in-flight git load may observe the disposed repository; LoadGitPropertiesAsync logs it and resets the item flags
-			cachedGitRepository?.Dispose();
+			try { cachedGitRepository?.Dispose(); } catch { }
 			cachedGitRepository = null;
+			cachedGitRepositoryPath = null;
 			gitRepositoryPathByDirectory.Clear();
 		}
 	}
