@@ -5,6 +5,7 @@ using Files.App.Helpers.Application;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -94,28 +95,8 @@ namespace Files.App
 						// Warm the settings file reads off the UI thread
 						_ = provider.GetRequiredService<IGeneralSettingsService>().LeaveAppRunning;
 						_ = provider.GetRequiredService<IAppearanceSettingsService>().AppThemeBackdropMaterial;
-
-						// Read through these statics by the action/context ctors warmed below
-						QuickAccessManager = provider.GetRequiredService<QuickAccessManager>();
-						HistoryWrapper = provider.GetRequiredService<StorageHistoryWrapper>();
-						FileTagsManager = provider.GetRequiredService<FileTagsManager>();
-						LibraryManager = provider.GetRequiredService<LibraryManager>();
-
-						// Warm every command and hotkey off-thread, below normal so window creation wins the cores
-						var previousPriority = Thread.CurrentThread.Priority;
-						Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
-						try
-						{
-							_ = provider.GetRequiredService<ICommandManager>();
-						}
-						catch (Exception)
-						{
-							// A command ctor that needs the UI thread aborts the warm-up; it runs on first use instead
-						}
-						finally
-						{
-							Thread.CurrentThread.Priority = previousPriority;
-						}
+						InitializeCompatibilityServices(provider);
+						WarmCommandManagerInBackground(provider);
 
 						return provider;
 					}
@@ -154,13 +135,11 @@ namespace Files.App
 				{
 					serviceProvider = AppLifecycleHelper.ConfigureHost(appModel);
 					Ioc.Default.ConfigureServices(serviceProvider);
+					InitializeCompatibilityServices(serviceProvider);
 				}
 
-				// Configure Sentry
-				// Sentry init is heavy (beforeSend/beforeBreadcrumb closures, transport setup) and is not
-				// required before the first frame; run it off the UI thread so it does not block navigation.
-				// Guard the background task so a Sentry init failure cannot surface as an unobserved
-				// exception and trigger the fatal handler (which calls Environment.Exit).
+				// Configure Sentry after the service barrier so its transport and sanitization
+				// setup cannot compete with the first page on the UI thread.
 				if (AppLifecycleHelper.AppEnvironment is not AppEnvironment.Dev)
 				{
 					_ = Task.Run(() =>
@@ -168,10 +147,11 @@ namespace Files.App
 						try
 						{
 							AppLifecycleHelper.ConfigureSentry();
+							ActiveSessionTracker.ReportPersistedTime();
 						}
 						catch (Exception ex)
 						{
-							System.Diagnostics.Debug.WriteLine($"Sentry init failed: {ex}");
+							System.Diagnostics.Debug.WriteLine($"Sentry initialization failed: {ex}");
 						}
 					});
 				}
@@ -195,16 +175,13 @@ namespace Files.App
 				}
 
 				// TODO: Replace with DI
-				QuickAccessManager = Ioc.Default.GetRequiredService<QuickAccessManager>();
-				HistoryWrapper = Ioc.Default.GetRequiredService<StorageHistoryWrapper>();
-				FileTagsManager = Ioc.Default.GetRequiredService<FileTagsManager>();
-				LibraryManager = Ioc.Default.GetRequiredService<LibraryManager>();
 				Logger = Ioc.Default.GetRequiredService<ILogger<App>>();
 				AppModel = Ioc.Default.GetRequiredService<AppModel>();
 
-				// Hook events for the window
-				MainWindow.Instance.Closed += Window_Closed;
-				MainWindow.Instance.Activated += Window_Activated;
+			// Hook events for the window
+			MainWindow.Instance.Closed += Window_Closed;
+			MainWindow.Instance.AppWindow.Closing += AppWindow_Closing;
+			MainWindow.Instance.Activated += Window_Activated;
 
 				Logger.LogInformation($"App launched. Launch args type: {appActivationArguments.Data.GetType().Name}");
 
@@ -227,32 +204,67 @@ namespace Files.App
 
 					_ = MainWindow.Instance.InitializeApplicationAsync(appActivationArguments.Data);
 				}
-				else
-				{
-					// Create a system tray icon
-					SystemTrayIcon = new SystemTrayIcon();
-					if (userSettingsService.GeneralSettingsService.ShowSystemTrayIcon)
-						SystemTrayIcon.Show();
-
-					// Sleep current instance
-					Program.Pool = new(0, 1, $"Files-{AppLifecycleHelper.AppEnvironment}-Instance");
-
-					Thread.Yield();
-
-					var cts = new CancellationTokenSource();
-					TryEmptyWorkingSetWhenIdle(cts.Token);
-
-					if (Program.Pool.WaitOne())
+					else
 					{
-						cts.Cancel();
+						// Create a system tray icon
+						SystemTrayIcon = new SystemTrayIcon();
+						if (userSettingsService.GeneralSettingsService.ShowSystemTrayIcon)
+							SystemTrayIcon.Show();
+
+						// Sleep current instance
+						Program.Pool = new(0, 1, $"Files-{AppLifecycleHelper.AppEnvironment}-Instance");
+
+						Thread.Yield();
+
+						var cts = new CancellationTokenSource();
+						TryEmptyWorkingSetWhenIdle(cts.Token);
+
+						try
+						{
+							// Wait off-thread so the UI dispatcher stays responsive
+							await Task.Run(() => Program.Pool?.WaitOne());
+						}
+						finally
+						{
+							cts.Cancel();
+						}
+
 						// Resume the instance
-						Program.Pool.Dispose();
+						Program.Pool?.Dispose();
 						Program.Pool = null;
 					}
-				}
 
 				await AppLifecycleHelper.InitializeAppComponentsAsync();
 			}
+		}
+
+		private static void InitializeCompatibilityServices(IServiceProvider serviceProvider)
+		{
+			QuickAccessManager = serviceProvider.GetRequiredService<QuickAccessManager>();
+			HistoryWrapper = serviceProvider.GetRequiredService<StorageHistoryWrapper>();
+			FileTagsManager = serviceProvider.GetRequiredService<FileTagsManager>();
+			LibraryManager = serviceProvider.GetRequiredService<LibraryManager>();
+		}
+
+		private static void WarmCommandManagerInBackground(IServiceProvider serviceProvider)
+		{
+			_ = Task.Run(() =>
+			{
+				var previousPriority = Thread.CurrentThread.Priority;
+				Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+				try
+				{
+					_ = serviceProvider.GetRequiredService<ICommandManager>();
+				}
+				catch (Exception ex)
+				{
+					System.Diagnostics.Debug.WriteLine($"Command manager warm-up failed: {ex}");
+				}
+				finally
+				{
+					Thread.CurrentThread.Priority = previousPriority;
+				}
+			});
 		}
 
 		/// <summary>
@@ -290,16 +302,106 @@ namespace Files.App
 		}
 
 		/// <summary>
+		/// Gets invoked when the main window is being closed. Cancelable - setting
+		/// <see cref="AppWindowClosingEventArgs.Cancel"/> keeps the window alive in
+		/// the background instead of tearing the process down.
+		/// </summary>
+		private void AppWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
+		{
+			var userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
+
+			bool stayInBackground = userSettingsService.GeneralSettingsService.LeaveAppRunning
+				&& !AppModel.ForceProcessTermination
+				&& !Process.GetProcessesByName("Files").Any(x => x.Id != Environment.ProcessId);
+
+			if (!stayInBackground)
+				return;
+
+			// Cancel the close so the window stays alive while cached in the background
+			args.Cancel = true;
+
+			// Hide and cache the window on the UI thread, then wait asynchronously for a resume signal
+			_ = MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(CacheWindowAndWaitForResumeAsync);
+		}
+
+		/// <summary>
+		/// Caches the window to the background and sleeps the process until a resume
+		/// signal is received (tray click, single-instance redirect, or Quit).
+		/// </summary>
+		private async Task CacheWindowAndWaitForResumeAsync()
+		{
+			var userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
+			var statusCenterViewModel = Ioc.Default.GetRequiredService<StatusCenterViewModel>();
+
+			// Close open content dialogs
+			UIHelpers.CloseAllDialogs();
+
+			// Close all notification banners except in progress
+			statusCenterViewModel.RemoveAllCompletedItems();
+
+			// Cache the window instead of closing it
+			MainWindow.Instance.AppWindow.Hide();
+			AppModel.IsMainWindowClosed = true;
+
+			// Close all tabs
+			MainPageViewModel.AppInstances.ForEach(tabItem => tabItem.Unload());
+			MainPageViewModel.AppInstances.Clear();
+
+			// Wait for all properties windows to close
+			await FilePropertiesHelpers.WaitClosingAll();
+
+			// Sleep current instance
+			Program.Pool = new(0, 1, $"Files-{AppLifecycleHelper.AppEnvironment}-Instance");
+
+			// Displays a notification the first time the app goes to the background
+			if (userSettingsService.AppSettingsService.ShowBackgroundRunningNotification)
+			{
+				SafetyExtensions.IgnoreExceptions(() =>
+				{
+					AppToastNotificationHelper.ShowBackgroundRunningToast();
+
+					userSettingsService.AppSettingsService.ShowBackgroundRunningNotification = false;
+				});
+			}
+
+			var cts = new CancellationTokenSource();
+			TryEmptyWorkingSetWhenIdle(cts.Token);
+
+			try
+			{
+				// Wait off-thread so the UI dispatcher stays responsive
+				await Task.Run(() => Program.Pool?.WaitOne());
+			}
+			finally
+			{
+				cts.Cancel();
+			}
+
+			// Resume the instance
+			Program.Pool?.Dispose();
+			Program.Pool = null;
+
+			if (AppModel.ForceProcessTermination)
+				return;
+
+			_ = AppLifecycleHelper.CheckAppUpdate();
+
+			MainWindow.Instance.AppWindow.Show();
+			MainWindow.Instance.Activate();
+		}
+
+		/// <summary>
 		/// Gets invoked when the application execution is closed.
 		/// </summary>
 		/// <remarks>
-		/// Saves the current state of the app such as opened tabs, and disposes all cached resources.
+		/// Performs final teardown when the window is actually closing (tray Quit,
+		/// update service termination, or background-running disabled). The
+		/// background-running path is handled by <see cref="AppWindow_Closing"/>.
 		/// </remarks>
 		private async void Window_Closed(object sender, WindowEventArgs args)
 		{
 			// Save application state and stop any background activity
 			IUserSettingsService userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
-			StatusCenterViewModel statusCenterViewModel = Ioc.Default.GetRequiredService<StatusCenterViewModel>();
 			ICommandManager commandManager = Ioc.Default.GetRequiredService<ICommandManager>();
 
 			// A Workaround for the crash (#10110)
@@ -336,63 +438,6 @@ namespace Files.App
 
 				using var eventHandle = PInvoke.CreateEvent(null, false, false, "FILEDIALOG");
 				PInvoke.SetEvent(eventHandle);
-			}
-
-			// Continue running the app on the background
-			if (userSettingsService.GeneralSettingsService.LeaveAppRunning &&
-				!AppModel.ForceProcessTermination &&
-				!Process.GetProcessesByName("Files").Any(x => x.Id != Environment.ProcessId))
-			{
-				// Close open content dialogs
-				UIHelpers.CloseAllDialogs();
-
-				// Close all notification banners except in progress
-				statusCenterViewModel.RemoveAllCompletedItems();
-
-				// Cache the window instead of closing it
-				MainWindow.Instance.AppWindow.Hide();
-				AppModel.IsMainWindowClosed = true;
-
-				// Close all tabs
-				MainPageViewModel.AppInstances.ForEach(tabItem => tabItem.Unload());
-				MainPageViewModel.AppInstances.Clear();
-
-				// Wait for all properties windows to close
-				await FilePropertiesHelpers.WaitClosingAll();
-
-				// Sleep current instance
-				Program.Pool = new(0, 1, $"Files-{AppLifecycleHelper.AppEnvironment}-Instance");
-
-				Thread.Yield();
-
-				// Displays a notification the first time the app goes to the background
-				if (userSettingsService.AppSettingsService.ShowBackgroundRunningNotification)
-				{
-					SafetyExtensions.IgnoreExceptions(() =>
-					{
-						AppToastNotificationHelper.ShowBackgroundRunningToast();
-
-						userSettingsService.AppSettingsService.ShowBackgroundRunningNotification = false;
-					});
-				}
-
-				var cts = new CancellationTokenSource();
-				TryEmptyWorkingSetWhenIdle(cts.Token);
-
-				if (Program.Pool.WaitOne())
-				{
-					cts.Cancel();
-					// Resume the instance
-					Program.Pool.Dispose();
-					Program.Pool = null;
-
-					if (!AppModel.ForceProcessTermination)
-					{
-						args.Handled = true;
-						_ = AppLifecycleHelper.CheckAppUpdate();
-						return;
-					}
-				}
 			}
 
 			// Stop the tray icon's hidden window before continuing teardown so a late "Quit"

@@ -74,6 +74,8 @@ namespace Files.App.ViewModels
 			set => SetProperty(ref shouldPreviewPaneBeDisplayed, value);
 		}
 
+		private bool _environmentRefreshScheduled;
+
 		public bool ShowShelfPane
 			=> GeneralSettingsService.ShowShelfPane && AppLifecycleHelper.AppEnvironment is AppEnvironment.Dev;
 
@@ -323,10 +325,40 @@ namespace Files.App.ViewModels
 			// Load the app theme resources
 			ResourcesService.LoadAppResources(AppearanceSettingsService);
 
-			await Task.WhenAll(
-				DrivesViewModel.UpdateDrivesAsync(),
-				NetworkService.UpdateComputersAsync(),
-				NetworkService.UpdateShortcutsAsync());
+			ScheduleEnvironmentRefresh();
+		}
+
+		private void ScheduleEnvironmentRefresh()
+		{
+			if (_environmentRefreshScheduled)
+				return;
+
+			_environmentRefreshScheduled = true;
+
+			async Task RefreshAsync()
+			{
+				try
+				{
+					await SafetyExtensions.IgnoreExceptions(async () =>
+					{
+						await Task.WhenAll(
+							DrivesViewModel.UpdateDrivesAsync(),
+							NetworkService.UpdateComputersAsync(),
+							NetworkService.UpdateShortcutsAsync());
+					}, App.Logger);
+				}
+				finally
+				{
+					_environmentRefreshScheduled = false;
+				}
+			}
+
+			if (!MainWindow.Instance.DispatcherQueue.TryEnqueue(
+				Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+				() => _ = RefreshAsync()))
+			{
+				_ = RefreshAsync();
+			}
 		}
 
 		private async Task RestoreSessionTabsAsync(List<string> sessionTabs)

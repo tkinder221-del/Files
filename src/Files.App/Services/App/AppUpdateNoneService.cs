@@ -1,4 +1,3 @@
-﻿using System.Net.Http;
 
 namespace Files.App.Services
 {
@@ -31,19 +30,12 @@ namespace Files.App.Services
 			return Task.CompletedTask;
 		}
 
-		public async Task CheckForReleaseNotesAsync()
+		public Task CheckForReleaseNotesAsync()
 		{
-			using var client = new HttpClient();
-
-			try
-			{
-				var response = await client.GetAsync(Constants.ExternalUrl.ReleaseNotesUrl);
-				AreReleaseNotesAvailable = response.IsSuccessStatusCode;
-			}
-			catch
-			{
-				AreReleaseNotesAvailable = false;
-			}
+			// The development implementation has no update channel. Avoid a network request
+			// during startup when release notes cannot be opened by this service.
+			AreReleaseNotesAvailable = false;
+			return Task.CompletedTask;
 		}
 
 		public Task DownloadMandatoryUpdatesAsync()

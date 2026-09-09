@@ -247,7 +247,7 @@ namespace Files.App.Views
 
 		protected override void OnNavigatedTo(NavigationEventArgs e)
 		{
-			_ = ViewModel.OnNavigatedToAsync(e);
+			_ = SafetyExtensions.IgnoreExceptions(() => ViewModel.OnNavigatedToAsync(e), App.Logger);
 		}
 
 		protected override async void OnPreviewKeyDown(KeyRoutedEventArgs e) => await OnPreviewKeyDownAsync(e);

@@ -31,6 +31,7 @@ namespace Files.App.Helpers
 		/// Gets the value that indicates if the release notes tab was automatically opened.
 		/// </summary>
 		private static bool ViewedReleaseNotes { get; set; } = false;
+		private static int _componentsInitializationScheduled;
 
 		/// <summary>
 		/// Gets the value that indicates if the app is updated.
@@ -104,53 +105,63 @@ namespace Files.App.Helpers
 			});
 
 		/// <summary>
-		/// Initializes the app components.
+		/// Schedules non-critical app components after the first UI work has completed.
 		/// </summary>
-		public static async Task InitializeAppComponentsAsync()
+		public static Task InitializeAppComponentsAsync()
 		{
-			var userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
-			var addItemService = Ioc.Default.GetRequiredService<IAddItemService>();
-			var generalSettingsService = userSettingsService.GeneralSettingsService;
-			var jumpListService = Ioc.Default.GetRequiredService<IWindowsJumpListService>();
-
-			ActiveSessionTracker.ReportPersistedTime();
-
-			// Start non-critical tasks without waiting; pinned loads alongside the others so its shell enumeration doesn't block them.
-			_ = Task.Run(async () =>
-			{
-				await Task.WhenAll(
-					App.QuickAccessManager.InitializeAsync(),
-					OptionalTaskAsync(CloudDrivesManager.UpdateDrivesAsync(), generalSettingsService.ShowCloudDrivesSection),
-					App.LibraryManager.UpdateLibrariesAsync(),
-					OptionalTaskAsync(WSLDistroManager.UpdateDrivesAsync(), generalSettingsService.ShowWslSection),
-					OptionalTaskAsync(App.FileTagsManager.UpdateFileTagsAsync(), generalSettingsService.ShowFileTagsSection),
-					jumpListService.InitializeAsync()
-				);
-
-				//Start the tasks separately to reduce resource contention
-				await Task.WhenAll(
-					addItemService.InitializeAsync(),
-					ContextMenu.WarmUpQueryContextMenuAsync()
-				);
-			});
-
-			_ = Task.Run(FileTagsHelper.UpdateTagsDb);
-
-			_ = Task.Run(async () =>
-			{
-				// The follwing method invokes UI thread, so we run it in a separate task
-				await CheckAppUpdate();
-			});
-
-			static Task OptionalTaskAsync(Task task, bool condition)
-			{
-				if (condition)
-					return task;
-
+			if (Interlocked.Exchange(ref _componentsInitializationScheduled, 1) != 0)
 				return Task.CompletedTask;
+
+			var userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
+			var generalSettingsService = userSettingsService.GeneralSettingsService;
+			generalSettingsService.PropertyChanged += GeneralSettingsService_PropertyChanged;
+
+			void ScheduleInitialization()
+				=> _ = InitializeDeferredAppComponentsAsync(generalSettingsService);
+
+			if (App.UiDispatcher is { } dispatcher)
+			{
+				if (!dispatcher.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, ScheduleInitialization))
+					ScheduleInitialization();
+			}
+			else
+			{
+				ScheduleInitialization();
 			}
 
-			generalSettingsService.PropertyChanged += GeneralSettingsService_PropertyChanged;
+			return Task.CompletedTask;
+		}
+
+		private static async Task InitializeDeferredAppComponentsAsync(IGeneralSettingsService generalSettingsService)
+		{
+			await Task.Run(async () =>
+			{
+				await SafetyExtensions.IgnoreExceptions(async () =>
+				{
+					var addItemService = Ioc.Default.GetRequiredService<IAddItemService>();
+					var jumpListService = Ioc.Default.GetRequiredService<IWindowsJumpListService>();
+
+					// Start shell and device maintenance after the first frame. Conditions are checked
+					// before invoking the async operation so disabled sections do not probe the system.
+					await Task.WhenAll(
+						App.QuickAccessManager.InitializeAsync(),
+						RunIfEnabledAsync(generalSettingsService.ShowCloudDrivesSection, CloudDrivesManager.UpdateDrivesAsync),
+						App.LibraryManager.UpdateLibrariesAsync(),
+						RunIfEnabledAsync(generalSettingsService.ShowWslSection, WSLDistroManager.UpdateDrivesAsync),
+						RunIfEnabledAsync(generalSettingsService.ShowFileTagsSection, App.FileTagsManager.UpdateFileTagsAsync),
+						jumpListService.InitializeAsync(),
+						addItemService.InitializeAsync(),
+						ContextMenu.WarmUpQueryContextMenuAsync());
+				}, App.Logger);
+			});
+
+			_ = Task.Run(() => SafetyExtensions.IgnoreExceptions(FileTagsHelper.UpdateTagsDb, App.Logger));
+
+			if (AppEnvironment is not AppEnvironment.Dev)
+				_ = Task.Run(async () => await SafetyExtensions.IgnoreExceptions(CheckAppUpdate, App.Logger));
+
+			static Task RunIfEnabledAsync(bool isEnabled, Func<Task> operation)
+				=> isEnabled ? operation() : Task.CompletedTask;
 		}
 
 		/// <summary>
