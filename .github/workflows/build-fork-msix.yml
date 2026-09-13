@@ -1,0 +1,72 @@
+name: Build Fork MSIX
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build-fork-msix.yml'
+
+env:
+  SOLUTION_PATH: '${{ github.workspace }}\Files.slnx'
+  APP_PROJECT_PATH: '${{ github.workspace }}\src\Files.App\Files.App.csproj'
+  APPX_PACKAGE_DIR: '${{ github.workspace }}\artifacts\AppxPackages\'
+  APPX_SELFSIGNED_CERT_PATH: '${{ github.workspace }}\.github\workflows\FilesApp_SelfSigned.pfx'
+
+jobs:
+  build-x64-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        shell: pwsh
+        run: |
+          msbuild $env:SOLUTION_PATH `
+            -t:Restore `
+            -p:Platform=x64 `
+            -p:Configuration=Release `
+            -p:PublishReadyToRun=true `
+            -v:minimal
+
+      - name: Create self-signed certificate
+        shell: pwsh
+        run: ./.github/scripts/Generate-SelfCertPfx.ps1 -Destination "$env:APPX_SELFSIGNED_CERT_PATH"
+
+      - name: Build and package
+        shell: pwsh
+        run: |
+          msbuild $env:APP_PROJECT_PATH `
+            -t:Build `
+            -p:Configuration=Release `
+            -p:Platform=x64 `
+            -p:AppxBundlePlatforms=x64 `
+            -p:AppxBundle=Always `
+            -p:GenerateAppxPackageOnBuild=true `
+            -p:UapAppxPackageBuildMode=SideloadOnly `
+            -p:AppxPackageDir=$env:APPX_PACKAGE_DIR `
+            -p:AppxPackageSigningEnabled=true `
+            -p:PackageCertificateKeyFile=$env:APPX_SELFSIGNED_CERT_PATH `
+            -p:PackageCertificatePassword="" `
+            -p:PackageCertificateThumbprint="" `
+            -v:minimal
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShawnDiego-Files-x64-Release
+          path: artifacts/AppxPackages/**
+          if-no-files-found: error
